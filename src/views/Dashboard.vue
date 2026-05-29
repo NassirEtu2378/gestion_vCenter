@@ -1,13 +1,18 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
-import { getVcenterList, getVcenterVms, getVmStorageGb } from '../api/vcenter'
+import ClusterFilter from '@/components/ClusterFilter.vue'
+import { getVcenterList, getVcenterClusters, getAllVmsWithClusterInfo, getVmStorageGb } from '../api/vcenter'
 
 const vcenters = ref([])
 const selectedVcenter = ref(null)
-const vms = ref([])
+const clusters = ref([])
+const selectedCluster = ref(null)
+const allVms = ref([])
 const isLoadingVcenters = ref(true)
+const isLoadingClusters = ref(false)
 const isLoadingVms = ref(false)
 const errorMessage = ref('')
+const clusterError = ref('')
 const currentPage = ref(1)
 const pageSize = ref(20)
 const vmStorage = ref({})
@@ -29,9 +34,14 @@ const loadVcenters = async () => {
   }
 }
 
+const getVmClusterName = (vm) => {
+  const clusterId = vm.cluster || vm.cluster_id
+  return clusterMapMemo.value.get(clusterId) ?? vm.cluster_name ?? clusterId ?? 'N/A'
+}
+
 const loadVcenterVms = async () => {
   if (!selectedVcenter.value) {
-    vms.value = []
+    allVms.value = []
     vmStorage.value = {}
     vmStorageLoading.value = {}
     return
@@ -41,7 +51,7 @@ const loadVcenterVms = async () => {
   errorMessage.value = ''
 
   try {
-    vms.value = await getVcenterVms(selectedVcenter.value.id)
+    allVms.value = await getAllVmsWithClusterInfo(selectedVcenter.value.id)
 
     currentPage.value = 1
     vmStorage.value = {}
@@ -49,7 +59,7 @@ const loadVcenterVms = async () => {
   } catch (error) {
     errorMessage.value =
       'Impossible de récupérer les machines virtuelles. Veuillez vérifier votre session vCenter.'
-    vms.value = []
+    allVms.value = []
     vmStorage.value = {}
     vmStorageLoading.value = {}
   } finally {
@@ -57,10 +67,66 @@ const loadVcenterVms = async () => {
   }
 }
 
+const loadClusters = async () => {
+  if (!selectedVcenter.value) {
+    clusters.value = []
+    selectedCluster.value = null
+    return
+  }
+
+  isLoadingClusters.value = true
+  clusterError.value = ''
+
+  try {
+    clusters.value = await getVcenterClusters(selectedVcenter.value.id)
+    selectedCluster.value = null
+    await loadVcenterVms()
+  } catch (error) {
+    clusterError.value = 'Impossible de charger les clusters.'
+    clusters.value = []
+    selectedCluster.value = null
+    vms.value = []
+    
+  } finally {
+    isLoadingClusters.value = false
+  }
+}
+
 const selectVcenter = async (vcenter) => {
   selectedVcenter.value = vcenter
-  await loadVcenterVms()
+  await loadClusters()
 }
+
+const selectCluster = (clusterId) => {
+  if (clusterId === null || clusterId === '') {
+    selectedCluster.value = null
+  } else {
+    const cluster = clusters.value.find(
+      (c) => (c.cluster || c.id) === clusterId
+    ) || null
+    selectedCluster.value = cluster
+  }
+  currentPage.value = 1
+}
+
+const vms = computed(() => {
+  if (!selectedCluster.value) {
+    return allVms.value
+  }
+  const clusterId = selectedCluster.value.cluster || selectedCluster.value.id
+  return allVms.value.filter((vm) => (vm.cluster || vm.cluster_id) === clusterId)
+})
+
+const clusterMapMemo = computed(() => {
+  const map = new Map()
+  for (const cluster of clusters.value) {
+    const id = cluster.cluster || cluster.id
+    if (id) {
+      map.set(id, cluster.name || cluster.cluster || '')
+    }
+  }
+  return map
+})
 
 const hasVms = computed(() => vms.value.length > 0)
 const pageCount = computed(() => Math.max(1, Math.ceil(vms.value.length / pageSize.value)))
@@ -96,19 +162,28 @@ const fetchVmStorage = async (vmId) => {
 }
 
 const loadStorageForPage = async () => {
+  const vmsToLoad = paginatedVms.value.filter((vm) => {
+    const vmId = vm.vm || vm.name
+    return vmStorage.value[vmId] === undefined
+  })
+
   await Promise.all(
-    paginatedVms.value.map((vm) => {
+    vmsToLoad.map((vm) => {
       const vmId = vm.vm || vm.name
       return fetchVmStorage(vmId)
     }),
   )
 }
 
+let storageLoadTimeout
 watch(
   () => paginatedVms.value.map((vm) => vm.vm || vm.name),
   () => {
     if (hasVms.value) {
-      loadStorageForPage()
+      clearTimeout(storageLoadTimeout)
+      storageLoadTimeout = setTimeout(() => {
+        loadStorageForPage()
+      }, 100)
     }
   },
   { immediate: true },
@@ -172,30 +247,23 @@ onMounted(() => {
             >
               <button type="button" @click="selectVcenter(vcenter)">
                 <span class="vcenter-name">{{ vcenter.name }}</span>
-                <span class="vcenter-host">{{ vcenter.host }}</span>
+                <!-- <span class="vcenter-host">{{ vcenter.host }}</span> -->
               </button>
             </li>
           </ul>
         </div>
-      </aside>
+
+          <ClusterFilter
+            :clusters="clusters"
+            :isLoading="isLoadingClusters"
+            :error="clusterError"
+            :selectedClusterId="selectedCluster?.cluster || selectedCluster?.id"
+            @update:selectedClusterId="selectCluster"
+          />
+        </aside>
 
       <main class="dashboard-content">
         <div class="panel">
-          <div class="panel-header">
-            <div>
-              <h2>Machines virtuelles</h2>
-              <p v-if="selectedVcenter" class="subtitle">
-                {{ selectedVcenter.description }}
-              </p>
-            </div>
-            <div class="status-pill" v-if="selectedVcenter">{{ selectedVcenter.host }}</div>
-          </div>
-
-          <div v-if="errorMessage" class="error-message">{{ errorMessage }}</div>
-          <div v-if="!selectedVcenter" class="panel-empty">
-            Sélectionnez un vCenter pour afficher les VM.
-          </div>
-
           <div v-if="isLoadingVms" class="panel-empty">Chargement des VM…</div>
 
           <table v-if="selectedVcenter && hasVms" class="vm-table">
@@ -219,7 +287,7 @@ onMounted(() => {
                 <td>
                   {{ formatDate(vm.create_time || vm.creation_time || vm.identity?.create_time) }}
                 </td>
-                <td>{{ vm.cluster || vm.cluster_name || vm.cluster_id || 'N/A' }}</td>
+                <td class="cluster_label">{{ getVmClusterName(vm) }}</td>
                 <td>{{ vm.folder || vm.folder_name || vm.folder_path || 'N/A' }}</td>
               </tr>
             </tbody>
@@ -293,6 +361,10 @@ onMounted(() => {
 .subtitle {
   margin: 0.35rem 0 0;
   color: #627d98;
+}
+
+.cluster_label{
+  font-size: medium;
 }
 
 .status-pill {
@@ -401,8 +473,8 @@ onMounted(() => {
 }
 
 .page-list button.active {
-  background: #2563eb;
-  border-color: #2563eb;
+  background: #4e71bd;
+  border-color: #5a7dca;
   color: #ffffff;
 }
 
@@ -417,5 +489,10 @@ onMounted(() => {
   color: #991b1b;
   background: #fee2e2;
   border-radius: 12px;
+}
+
+:deep(.cluster-filter-panel) {
+  padding: 0;
+  margin-top: 1.5rem;
 }
 </style>

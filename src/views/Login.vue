@@ -23,14 +23,10 @@ const submitLogin = async () => {
       throw new Error('Impossible de se connecter au vCenter principal.')
     }
 
-    localStorage.setItem('vcenter_session_default', primaryResult.value)
     console.log('[login] token default:', primaryResult.value)
 
     if (secondaryResult.status === 'fulfilled' && secondaryResult.value) {
-      localStorage.setItem('vcenter_session_secondary', secondaryResult.value)
       console.log('[login] token secondary:', secondaryResult.value)
-    } else {
-      localStorage.removeItem('vcenter_session_secondary')
     }
 
     await router.push('/dashboard')
